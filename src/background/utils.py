@@ -86,7 +86,7 @@ class BackgroundProcess(object):
         self.force_maintenance = False
 
         self.__maintenance_hooks = []
-        self.__logger = logger
+        self._logger = logger
         self.__pidfile_path = service["pidfile_path"]
         self.__create_pidfile()
 
@@ -183,25 +183,25 @@ class BackgroundProcess(object):
             self.synchronize_when_idle = False
 
     def error(self, message):
-        self.__logger.error(message)
+        self._logger.error(message)
 
     def warning(self, message):
-        self.__logger.warning(message)
+        self._logger.warning(message)
 
     def info(self, message):
-        self.__logger.info(message)
+        self._logger.info(message)
 
     def debug(self, message):
-        self.__logger.debug(message)
+        self._logger.debug(message)
 
     def exception(self, message=None, as_warning=False):
         backtrace = traceback.format_exc()
         if message is None:
             message = "unhandled exception: " + backtrace.splitlines()[-1]
         if as_warning:
-            self.__logger.warning(message + "\n" + indent(backtrace))
+            self._logger.warning(message + "\n" + indent(backtrace))
         else:
-            self.__logger.error(message + "\n" + indent(backtrace))
+            self._logger.error(message + "\n" + indent(backtrace))
 
     def register_maintenance(self, hour, minute, callback):
         self.__maintenance_hooks.append(

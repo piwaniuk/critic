@@ -14,8 +14,14 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
+import logging
+
 import api
+from background import branchtracker
+import dbutils
 import jsonapi
+
+_logger = logging.getLogger(__name__)
 
 @jsonapi.PrimaryResource
 class Reviews(object):
@@ -158,6 +164,31 @@ class Reviews(object):
                 raise jsonapi.InternalRedirect("v1/comments")
 
         raise jsonapi.UsageError("Review creation not yet supported")
+
+    @staticmethod
+    def update(parameters, value, values, data):
+        reviews = [value] if value else values
+
+        converted = jsonapi.convert(
+            parameters, {"updatetracking?": bool}, data)
+
+        for review in reviews:
+            if converted.get("updatetracking", False):
+                Reviews._updateTracking(parameters, review)
+
+        return value, values
+
+    @staticmethod
+    def _updateTracking(parameters, review):
+        db = dbutils.Database.forUser(parameters.critic)
+        # get tracked branch from review
+        db_review = dbutils.Review.fromId(db, review.id)
+        db_tracked_branch = db_review.getTrackedBranch(db)
+        
+        # call branch updater
+        branchtracker.doTrackedBranchUpdate(
+            db, _logger, db_tracked_branch.id, db_review.repository.id,
+            db_review.branch.name, db_tracked_branch.remote, db_tracked_branch.name, True)
 
     @staticmethod
     def deduce(parameters):

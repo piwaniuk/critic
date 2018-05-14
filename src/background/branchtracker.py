@@ -35,113 +35,109 @@ import configuration
 # See https://github.com/git/git/blob/master/sideband.c for details.
 DUMB_SUFFIX = "        "
 
-class BranchTracker(background.utils.BackgroundProcess):
-    def __init__(self):
-        super(BranchTracker, self).__init__(service=configuration.services.BRANCHTRACKER)
+def doTrackedBranchUpdate(db, logger, trackedbranch_id, repository_id, local_name, remote, remote_name, forced):
+    repository = gitutils.Repository.fromId(db, repository_id)
 
-    def update(self, trackedbranch_id, repository_id, local_name, remote, remote_name, forced):
-        repository = gitutils.Repository.fromId(self.db, repository_id)
+    try:
+        with repository.relaycopy("branchtracker") as relay:
+            relay.run("remote", "add", "source", remote)
 
-        try:
-            with repository.relaycopy("branchtracker") as relay:
-                relay.run("remote", "add", "source", remote)
+            current = None
+            new = None
+            tags = []
 
-                current = None
-                new = None
-                tags = []
+            if local_name == "*":
+                output = relay.run("fetch", "source", "refs/tags/*:refs/tags/*", include_stderr=True)
+                for line in output.splitlines():
+                    if "[new tag]" in line:
+                        tags.append(line.rsplit(" ", 1)[-1])
+            else:
+                relay.run("fetch", "--quiet", "--no-tags", "source", "refs/heads/%s:refs/remotes/source/%s" % (remote_name, remote_name))
+                try:
+                    current = repository.revparse("refs/heads/%s" % local_name)
+                except gitutils.GitReferenceError:
+                    # It's okay if the local branch doesn't exist (yet).
+                    pass
+                new = relay.run("rev-parse", "refs/remotes/source/%s" % remote_name).strip()
 
+            if current != new or tags:
                 if local_name == "*":
-                    output = relay.run("fetch", "source", "refs/tags/*:refs/tags/*", include_stderr=True)
-                    for line in output.splitlines():
-                        if "[new tag]" in line:
-                            tags.append(line.rsplit(" ", 1)[-1])
+                    refspecs = [("refs/tags/%s" % tag) for tag in tags]
                 else:
-                    relay.run("fetch", "--quiet", "--no-tags", "source", "refs/heads/%s:refs/remotes/source/%s" % (remote_name, remote_name))
-                    try:
-                        current = repository.revparse("refs/heads/%s" % local_name)
-                    except gitutils.GitReferenceError:
-                        # It's okay if the local branch doesn't exist (yet).
-                        pass
-                    new = relay.run("rev-parse", "refs/remotes/source/%s" % remote_name).strip()
+                    refspecs = ["refs/remotes/source/%s:refs/heads/%s"
+                                % (remote_name, local_name)]
 
-                if current != new or tags:
+                returncode, stdout, stderr = relay.run(
+                    "push", "--force", "origin", *refspecs,
+                    env={ "CRITIC_FLAGS": "trackedbranch_id=%d" % trackedbranch_id,
+                          "TERM": "dumb" },
+                    check_errors=False)
+
+                stderr_lines = []
+                remote_lines = []
+
+                for line in stderr.splitlines():
+                    if line.endswith(DUMB_SUFFIX):
+                        line = line[:-len(DUMB_SUFFIX)]
+                    stderr_lines.append(line)
+                    if line.startswith("remote: "):
+                        line = line[8:]
+                        remote_lines.append(line)
+
+                if returncode == 0:
                     if local_name == "*":
-                        refspecs = [("refs/tags/%s" % tag) for tag in tags]
+                        for tag in tags:
+                            logger.info("  updated tag: %s" % tag)
+                    elif current:
+                        logger.info("  updated branch: %s: %s..%s" % (local_name, current[:8], new[:8]))
                     else:
-                        refspecs = ["refs/remotes/source/%s:refs/heads/%s"
-                                    % (remote_name, local_name)]
+                        logger.info("  created branch: %s: %s" % (local_name, new[:8]))
 
-                    returncode, stdout, stderr = relay.run(
-                        "push", "--force", "origin", *refspecs,
-                        env={ "CRITIC_FLAGS": "trackedbranch_id=%d" % trackedbranch_id,
-                              "TERM": "dumb" },
-                        check_errors=False)
+                    hook_output = ""
 
-                    stderr_lines = []
-                    remote_lines = []
+                    for line in remote_lines:
+                        logger.debug("  [hook] " + line)
+                        hook_output += line + "\n"
 
-                    for line in stderr.splitlines():
-                        if line.endswith(DUMB_SUFFIX):
-                            line = line[:-len(DUMB_SUFFIX)]
-                        stderr_lines.append(line)
-                        if line.startswith("remote: "):
-                            line = line[8:]
-                            remote_lines.append(line)
-
-                    if returncode == 0:
-                        if local_name == "*":
-                            for tag in tags:
-                                self.info("  updated tag: %s" % tag)
-                        elif current:
-                            self.info("  updated branch: %s: %s..%s" % (local_name, current[:8], new[:8]))
-                        else:
-                            self.info("  created branch: %s: %s" % (local_name, new[:8]))
-
-                        hook_output = ""
-
-                        for line in remote_lines:
-                            self.debug("  [hook] " + line)
-                            hook_output += line + "\n"
-
-                        if local_name != "*":
-                            cursor = self.db.cursor()
-                            cursor.execute("INSERT INTO trackedbranchlog (branch, from_sha1, to_sha1, hook_output, successful) VALUES (%s, %s, %s, %s, %s)",
-                                           (trackedbranch_id, current if current else '0' * 40, new if new else '0' * 40, hook_output, True))
-                            self.db.commit()
+                    if local_name != "*":
+                        cursor = db.cursor()
+                        cursor.execute("INSERT INTO trackedbranchlog (branch, from_sha1, to_sha1, hook_output, successful) VALUES (%s, %s, %s, %s, %s)",
+                                       (trackedbranch_id, current if current else '0' * 40, new if new else '0' * 40, hook_output, True))
+                        db.commit()
+                else:
+                    if local_name == "*":
+                        error = "update of tags from %s failed" % remote
                     else:
-                        if local_name == "*":
-                            error = "update of tags from %s failed" % remote
-                        else:
-                            error = "update of branch %s from %s in %s failed" % (local_name, remote_name, remote)
+                        error = "update of branch %s from %s in %s failed" % (local_name, remote_name, remote)
 
-                        hook_output = ""
+                    hook_output = ""
 
-                        for line in stderr_lines:
-                            error += "\n    " + line
+                    for line in stderr_lines:
+                        error += "\n    " + line
 
-                        for line in remote_lines:
-                            hook_output += line + "\n"
+                    for line in remote_lines:
+                        hook_output += line + "\n"
 
-                        self.error(error)
+                    logger.error(error)
 
-                        cursor = self.db.cursor()
+                    cursor = db.cursor()
 
-                        if local_name != "*":
-                            cursor.execute("""INSERT INTO trackedbranchlog (branch, from_sha1, to_sha1, hook_output, successful)
-                                                   VALUES (%s, %s, %s, %s, %s)""",
-                                           (trackedbranch_id, current, new, hook_output, False))
-                            self.db.commit()
+                    if local_name != "*":
+                        cursor.execute("""INSERT INTO trackedbranchlog (branch, from_sha1, to_sha1, hook_output, successful)
+                                               VALUES (%s, %s, %s, %s, %s)""",
+                                       (trackedbranch_id, current, new, hook_output, False))
+                        db.commit()
 
-                        cursor.execute("SELECT uid FROM trackedbranchusers WHERE branch=%s", (trackedbranch_id,))
-                        recipients = [dbutils.User.fromId(self.db, user_id) for (user_id,) in cursor]
+                    cursor.execute("SELECT uid FROM trackedbranchusers WHERE branch=%s", (trackedbranch_id,))
+                    recipients = [dbutils.User.fromId(db, user_id) for (user_id,) in cursor]
 
-                        if local_name == "*":
-                            mailutils.sendMessage(recipients, "%s: update of tags from %s stopped!" % (repository.name, remote),
-                                                  """\
+                    if local_name == "*":
+                        mailutils.sendMessage(recipients, "%s: update of tags from %s stopped!" % (repository.name, remote),
+                                              """\
 The automatic update of tags in
-  %s:%s
+%s:%s
 from the remote
-  %s
+%s
 failed, and has been disabled.  Manual intervention is required to resume the
 automatic updating.
 
@@ -149,13 +145,13 @@ Output from Critic's git hook
 -----------------------------
 
 %s""" % (configuration.base.HOSTNAME, repository.path, remote, hook_output))
-                        else:
-                            mailutils.sendMessage(recipients, "%s: update from %s in %s stopped!" % (local_name, remote_name, remote),
-                                                  """\
+                    else:
+                        mailutils.sendMessage(recipients, "%s: update from %s in %s stopped!" % (local_name, remote_name, remote),
+                                              """\
 The automatic update of the branch '%s' in
-  %s:%s
+%s:%s
 from the branch '%s' in
-  %s
+%s
 failed, and has been disabled.  Manual intervention is required to resume the
 automatic updating.
 
@@ -164,31 +160,40 @@ Output from Critic's git hook
 
 %s""" % (local_name, configuration.base.HOSTNAME, repository.path, remote_name, remote, hook_output))
 
-                        # Disable the tracking.
-                        return False
-                else:
-                    self.debug("  fetched %s in %s; no changes" % (remote_name, remote))
-
-            # Everything went well; keep the tracking enabled.
-            return True
-        except:
-            exception = traceback.format_exc()
-
-            if local_name == "*":
-                error = "  update of tags from %s failed" % remote
+                    # Disable the tracking.
+                    return False
             else:
-                error = "  update of branch %s from %s in %s failed" % (local_name, remote_name, remote)
+                logger.debug("  fetched %s in %s; no changes" % (remote_name, remote))
 
-            for line in exception.splitlines():
-                error += "\n    " + line
+        # Everything went well; keep the tracking enabled.
+        return True
+    except:
+        exception = traceback.format_exc()
 
-            self.error(error)
+        if local_name == "*":
+            error = "  update of tags from %s failed" % remote
+        else:
+            error = "  update of branch %s from %s in %s failed" % (local_name, remote_name, remote)
 
-            # The expected failure (in case of diverged branches, or review branch
-            # irregularities) is a failed "git push" and is handled above.  This is
-            # an unexpected failure, so might be intermittent.  Leave the tracking
-            # enabled and spam the system administrator(s).
-            return True
+        for line in exception.splitlines():
+            error += "\n    " + line
+
+        logger.error(error)
+
+        # The expected failure (in case of diverged branches, or review branch
+        # irregularities) is a failed "git push" and is handled above.  This is
+        # an unexpected failure, so might be intermittent.  Leave the tracking
+        # enabled and spam the system administrator(s).
+        return True
+
+class BranchTracker(background.utils.BackgroundProcess):
+    def __init__(self):
+        super(BranchTracker, self).__init__(service=configuration.services.BRANCHTRACKER)
+
+    def update(self, trackedbranch_id, repository_id, local_name, remote, remote_name, forced):
+        doTrackedBranchUpdate(
+            self.db, self._logger,
+            trackedbranch_id, repository_id, local_name,remote, remote_name, forced)
 
     def run(self):
         self.db = dbutils.Database.forSystem()
@@ -286,4 +291,5 @@ def start_service():
     tracker = BranchTracker()
     return tracker.start()
 
-background.utils.call("branchtracker", start_service)
+if __name__ == '__main__':
+    background.utils.call("branchtracker", start_service)

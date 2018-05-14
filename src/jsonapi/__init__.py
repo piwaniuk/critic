@@ -485,7 +485,7 @@ def finishPUT(critic, req, parameters, resource_class, value, values, data):
         requireSignIn(critic)
 
     if not resource_class.update:
-        raise UsageError("Resource class does not support updating: "
+        raise UsageError("Resource class does not support updating: %s"
                          % resource_class.name)
 
     if value or values:
