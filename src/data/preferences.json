@@ -294,7 +294,8 @@
   "review.updateAnyBranch": {
     "type": "boolean",
     "default": true,
-    "description": "Allow any user to update tracking branch instead of owner only."
+    "description": "Allow any user to update tracking branch instead of owner only.",
+    "relevance": {"user": false}
   },
   "review.updateCheckInterval": {
     "type": "integer",
