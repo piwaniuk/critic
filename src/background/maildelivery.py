@@ -143,16 +143,10 @@ class MailDelivery(background.utils.PeerServer):
                             if self.__send(**eval(lines[0])):
                                 os.rename(filename, "%s/sent/%s.sent" % (configuration.paths.OUTBOX, os.path.basename(filename)))
 
-                                if self.__has_logged_warning or self.__has_logged_error:
-                                    try: self.__sendAdministratorMessage()
-                                    except:
-                                        self.exception()
-                                        self.__has_logged_error += 1
-
                             # We may have been terminated while attempting to send.
                             if self.terminated:
                                 return
-                        except:
+                        except (smtplib.SMTPException, OSError):
                             self.exception()
                             self.__has_logged_error += 1
                             os.rename(filename, "%s/%s.invalid" % (configuration.paths.OUTBOX, os.path.basename(filename)))
@@ -174,6 +168,14 @@ class MailDelivery(background.utils.PeerServer):
                         self.debug("sleep interrupted after %.2f seconds" % (time.time() - before))
 
                     sleeptime += (time.time() - before)
+
+                # flush any errors in message sending
+                if self.__has_logged_warning or self.__has_logged_error:
+                    try:
+                        self.__sendAdministratorMessage()
+                    except smtplib,SMTPException:
+                        self.exception()
+                        self.__has_logged_error += 1
         finally:
             self.__disconnect()
 
@@ -201,10 +203,10 @@ class MailDelivery(background.utils.PeerServer):
 
                     self.debug("connected")
                     return
-                except:
+                except smtplib.SMTPException:
                     self.debug("failed to connect to SMTP server")
                     if (attempts % 5) == 0:
-                        self.error("Failed to connect to SMTP server %d times.  "
+                        self.info("Failed to connect to SMTP server %d times.  "
                                    "Will keep retrying." % attempts)
                         self.__has_logged_error += 1
                     self.__connection = None
@@ -220,7 +222,8 @@ class MailDelivery(background.utils.PeerServer):
             try:
                 self.__connection.quit()
                 self.debug("disconnected")
-            except: pass
+            except smtplib.SMTPException:
+                self.info("error while disconnecting")
 
             self.__connection = None
 
@@ -287,10 +290,7 @@ class MailDelivery(background.utils.PeerServer):
             try:
                 self.__connection.sendmail(configuration.base.SYSTEM_USER_EMAIL, [to_user.email], message.as_string())
                 return True
-            except:
-                self.exception()
-                self.__has_logged_error += 1
-
+            except smtplib.SMTPException:
                 if self.terminated:
                     return False
 
@@ -300,7 +300,7 @@ class MailDelivery(background.utils.PeerServer):
 
                 sleeptime = min(60, 2 ** attempts)
 
-                self.error("delivery failure: sleeping %d seconds" % sleeptime)
+                self.info("delivery failure: sleeping %d seconds" % sleeptime)
 
                 self.__disconnect()
                 time.sleep(sleeptime)
